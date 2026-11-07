@@ -80,6 +80,46 @@ export const record = (state: CacheState, step: Step): CacheState => {
   return next
 }
 
+/**
+ * What a session keeps between launches, so a resumed session knows when its
+ * last reply was (and so whether the cache is still warm) instead of starting
+ * over. The TTL is kept apart, across all sessions.
+ */
+export type Saved = Pick<CacheState, 'last' | 'totalInput' | 'totalRead' | 'misses' | 'missTokens'>
+
+export const toSaved = (s: CacheState): Saved => ({
+  last: s.last,
+  totalInput: s.totalInput,
+  totalRead: s.totalRead,
+  misses: s.misses,
+  missTokens: s.missTokens,
+})
+
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
+
+const isStep = (v: unknown): v is Step => {
+  if (typeof v !== 'object' || v === null) return false
+  const s = v as Record<string, unknown>
+  return isNum(s.at) && isNum(s.input) && isNum(s.cacheRead) && isNum(s.cacheWrite)
+}
+
+/** Folds what a session saved into a fresh state; anything malformed is ignored. */
+export const restore = (state: CacheState, saved: unknown): CacheState => {
+  if (typeof saved !== 'object' || saved === null) return state
+  const v = saved as Record<string, unknown>
+  if (!isStep(v.last) || !isNum(v.totalInput) || !isNum(v.totalRead) || !isNum(v.misses) || !isNum(v.missTokens)) {
+    return state
+  }
+  return {
+    ...state,
+    last: { at: v.last.at, input: v.last.input, cacheRead: v.last.cacheRead, cacheWrite: v.last.cacheWrite },
+    totalInput: v.totalInput,
+    totalRead: v.totalRead,
+    misses: v.misses,
+    missTokens: v.missTokens,
+  }
+}
+
 export const fmtClock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
   if (s < 60) return `${s}s`

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
-import { cacheDetails, fmtClock, fresh, record, shouldWarn, TTL_MS } from './cache'
+import { cacheDetails, fmtClock, fresh, record, restore, shouldWarn, toSaved, TTL_MS } from './cache'
 import type { CacheState, Ttl } from './cache'
 import { crossed, limitDetails, longName } from './limits'
 import type { Limit } from './limits'
@@ -22,6 +22,10 @@ const STORE_TTL = 'ttl'
 const STORE_TTL_SOURCE = 'ttlSource'
 const STORE_THEME = 'theme'
 const STORE_WELCOMED = 'welcomed'
+/** Per-session cache state, `session:<id>`, so a resume picks up where it left off. */
+const SESSION_PREFIX = 'session:'
+/** Sessions remembered; the least recently used beyond this are forgotten. */
+const MAX_SESSIONS = 30
 /** One animation frame. Text that did not change is not sent again. */
 const TICK_MS = 800
 
@@ -34,7 +38,8 @@ let limits: readonly Limit[] = []
 let tick: { cancel: () => void } | null = null
 let theme: ThemeName = DEFAULT_THEME
 let frame = 0
-let shown: string | undefined = undefined
+/** The text last sent to the status line; null forces the next draw to send. */
+let shown: string | undefined | null = null
 let isPickerOpen = false
 
 /** The whole line for a theme and frame: cache first, then the windows. */
@@ -69,7 +74,7 @@ async function draw($: EngineInterface) {
 
 async function choose($: EngineInterface, name: ThemeName) {
   theme = name
-  shown = undefined
+  shown = null
   await $.store.set(STORE_THEME, name)
   await update($, chosen, () => name)
   await draw($)
@@ -96,6 +101,18 @@ async function alert($: EngineInterface, limit: SessionRateLimit) {
   if (level >= 90) await $.ui.notify(text, { title: 'Claude usage' }).catch(() => undefined)
 }
 
+/**
+ * Saves this session's cache state. Deleting first moves the key to the end of
+ * the store's insertion order, so the oldest sessions are the first keys.
+ */
+async function save($: EngineInterface) {
+  const key = SESSION_PREFIX + (await $.session.id())
+  await $.store.delete(key)
+  await $.store.set(key, toSaved(cache))
+  const sessions = (await $.store.keys()).filter(k => k.startsWith(SESSION_PREFIX))
+  for (const old of sessions.slice(0, Math.max(0, sessions.length - MAX_SESSIONS))) await $.store.delete(old)
+}
+
 async function takeLimits($: EngineInterface, next: readonly SessionRateLimit[]) {
   limits = next.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt }))
   for (const l of next) await alert($, l)
@@ -106,7 +123,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     cache = fresh()
-    shown = undefined
+    shown = null
     const saved = await $.store.get(STORE_THEME)
     theme = isTheme(saved) ? saved : DEFAULT_THEME
     await update($, chosen, () => theme)
@@ -116,6 +133,9 @@ export const register: Register = on => {
       cache.ttl = ttl
       cache.ttlSource = source === 'manual' ? 'manual' : 'learned'
     }
+    // A resumed session: remember when its last reply was, so the line shows
+    // a cold cache as cold instead of nothing, then a fresh countdown.
+    cache = restore(cache, await $.store.get(SESSION_PREFIX + (await $.session.id())))
     await $.command.register({
       name: 'meter',
       description: 'Prompt cache and usage limits: details, "designs" to pick a look, "theme <name>", "ttl 5m|1h|auto"',
@@ -149,6 +169,7 @@ export const register: Register = on => {
         await $.store.set(STORE_TTL, cache.ttl)
         await $.store.set(STORE_TTL_SOURCE, 'learned')
       }
+      await save($)
       await draw($)
     }
     return response
@@ -229,7 +250,8 @@ export const register: Register = on => {
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
     cache = { ...cache, last: null }
-    shown = undefined
+    shown = null
+    await $.store.delete(SESSION_PREFIX + (await $.session.id()))
     await draw($)
     return result
   }).catch(($, e, next) => next(e))
@@ -237,7 +259,7 @@ export const register: Register = on => {
   on('session.end', async ($, e, next) => {
     tick?.cancel()
     tick = null
-    shown = undefined
+    shown = null
     $.ui.status(undefined)
     return next(e)
   })

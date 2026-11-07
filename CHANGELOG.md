@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 — 2026-11-07
+
+- Fix: resuming a session no longer resets the cache countdown. The last reply's time and size are saved per session (the last 30), so a resumed session shows the cache still warm with the right time left, or cold with the re-cache cost, instead of nothing and then a fresh hour.
+- Fix: the first draw after a session starts always reaches the status line, so a stale line can't linger.
+
 ## 1.0.0 — 2026-11-07
 
 First public release.

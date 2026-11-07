@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { cacheSegment, fresh, record, shouldWarn } from './cache'
+import { cacheSegment, fresh, record, restore, shouldWarn, toSaved } from './cache'
 import { crossed, fmtSpan, limitSegments, pace } from './limits'
 import { statusLine } from './register'
 import { DYNAMIC, render, SAMPLE, snapshot, STATIC, THEMES } from './themes'
@@ -108,6 +108,7 @@ test('the engine path: limits at start, cache after a reply, alerts once', async
   const reading = (percentUsed: number) => [{ kind: 'five_hour', percentUsed, resetsAt: iso(T0 + 2.5 * H) }]
   on('session.usage', () => ({ value: { startedAt: T0, context: { window: 200_000 }, rateLimits: reading(50) } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 's1' }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('turn.step', async function* (_, e) {
     return {
@@ -202,6 +203,7 @@ test('first run offers the designs once, and a press picks one', async ($, on) =
   on('ui.open', (_, e) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('session.usage', () => ({ value: { startedAt: T0, context: { window: 200_000 }, rateLimits: [] } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 's1' }))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   expect(opened).toEqual(['usage-meter-designs'])
@@ -228,4 +230,90 @@ test('first run offers the designs once, and a press picks one', async ($, on) =
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   expect(opened.length).toBe(1)
+})
+
+describe('resume', () => {
+  test('saved state round-trips and junk is ignored', async () => {
+    let s = record(fresh(), step(0, 0, 20_000))
+    s = record(s, step(1 * M, 500, 20_500))
+    const back = restore(fresh(), JSON.parse(JSON.stringify(toSaved(s))))
+    expect([back.last, back.totalInput, back.totalRead, back.misses]).toEqual([s.last, s.totalInput, s.totalRead, 1])
+    expect(restore(fresh(), { last: { at: 'x' } })).toEqual(fresh())
+    expect(restore(fresh(), undefined)).toEqual(fresh())
+  })
+
+  const reply = (cacheRead: number, cacheWrite: number) =>
+    async function* (_: unknown, e: { turnId: string; index: number }) {
+      return {
+        turnId: e.turnId,
+        index: e.index,
+        answer: 'hi',
+        toolUses: [],
+        stopReason: 'end_turn',
+        usage: { model: 'test', input_tokens: 10, output_tokens: 5, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite },
+      } as never
+    }
+
+  const setup = (on: Parameters<Parameters<typeof test>[1]>[1], id: { value: string }) => {
+    const statuses: (string | undefined)[] = []
+    on('command.register', () => ({ value: { command: 'meter' } }))
+    on('ui.status', (_, e) => (statuses.push(e.text), { value: undefined }))
+    on('ui.toast', () => ({ value: undefined }))
+    on('session.usage', () => ({ value: { startedAt: T0, context: { window: 200_000 }, rateLimits: [] } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+    on('session.id', () => ({ value: id.value }))
+    on('turn.step', reply(0, 30_000))
+    return statuses
+  }
+
+  const send = async ($: { turn: { step: (i: never) => AsyncIterable<unknown> & { result: Promise<unknown> } } }) => {
+    const stream = $.turn.step({ turnId: 't', index: 0, model: 'test', messageCount: 1 } as never)
+    for await (const _ of stream) {
+      // drain
+    }
+    await stream.result
+  }
+
+  test('a session resumed after the cache lapsed shows it cold, not a fresh hour', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on, { theme: 'classic', welcomed: true, ttl: '1h', ttlSource: 'learned' })
+    const statuses = setup(on, { value: 's1' })
+
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await send($ as never)
+    expect(statuses.at(-1)).toBe('🟢 cache 1h 0m · hit 0%')
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } } as never)
+
+    await clock.advance(2 * H)
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    expect(statuses.at(-1)).toBe('🔴 cache cold · ~30k to re-cache')
+  })
+
+  test('a session resumed inside the window keeps counting down', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on, { theme: 'classic', welcomed: true, ttl: '1h', ttlSource: 'learned' })
+    const statuses = setup(on, { value: 's1' })
+
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await send($ as never)
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } } as never)
+
+    await clock.advance(20 * M)
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    expect(statuses.at(-1)).toBe('🟢 cache 40m · hit 0%')
+  })
+
+  test('another session does not inherit the state', async ($, on) => {
+    mock.clock(on, { now: T0 })
+    mock.store(on, { theme: 'classic', welcomed: true })
+    const id = { value: 's1' }
+    const statuses = setup(on, id)
+
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await send($ as never)
+    id.value = 's2'
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    expect(statuses.at(-1)).toBeUndefined()
+  })
 })

@@ -115,6 +115,7 @@ usage-meter uses only what Claude Code already hands every mod.
 
 - **Cache countdown.** After each reply, Claude Code reports how many prompt tokens were read from the cache and how many were written. The cache is a sliding window, so the deadline is the last reply plus the cache lifetime.
 - **Learning the lifetime.** The API doesn't say whether your cache lasts 5 minutes or 1 hour. usage-meter starts by assuming 1 hour (`?`). After you pause for 5 to 60 minutes, it checks whether the next reply still read the cache. If it did, the lifetime is 1 hour; if it read nothing, 5 minutes. It remembers the answer.
+- **Resuming a session.** The time and size of each session's last reply are kept, so a session you come back to shows the cache as it really is: still counting down, or cold with the cost of re-caching. Before 1.0.1 a resumed session forgot this and started a fresh countdown at its next reply. The last 30 sessions are kept; older ones are forgotten.
 - **Unexpected re-caches.** A reply inside the window that reads much less than the conversation it carries counts as a re-cache. Expiry and `/compact` are expected and don't count.
 - **Limits.** Claude Code's own rate-limit figures (`five_hour` and `seven_day`), with their reset times, arrive with each reply. No credentials and no extra requests are involved.
 - **Pace forecast.** A straight line from how much of the window you've used and how much time has passed. It stays quiet in the first 10% of a window, where a forecast is mostly noise.
@@ -131,9 +132,9 @@ usage-meter is built to be safe to install for anyone:
 | **Files** | None read or written. |
 | **Processes** | None started. |
 | **Your conversation** | Never read or changed. It sees token counts, not text. It never compacts, sends messages or runs tools. |
-| **What it stores** | A few values in Claude Code's per-plugin store: your design, the learned cache lifetime, the alerts already shown, and whether the picker was offered. |
+| **What it stores** | A few values in Claude Code's per-plugin store: your design, the learned cache lifetime, the alerts already shown, whether the picker was offered, and, for your last 30 sessions, the time and token counts of the last reply. |
 
-You can check this yourself. `claude plugin validate` lists every engine call a mod makes; for usage-meter they are the clock, its own command, the session's usage figures, its own store, and the UI (status line, toasts, notifications, its picker pane). The whole mod is about 800 lines of TypeScript in [hooks/](hooks). See [SECURITY.md](SECURITY.md) to report a problem.
+You can check this yourself. `claude plugin validate` lists every engine call a mod makes; for usage-meter they are the clock, its own command, the session's id and usage figures, its own store, and the UI (status line, toasts, notifications, its picker pane). The whole mod is about 800 lines of TypeScript in [hooks/](hooks). See [SECURITY.md](SECURITY.md) to report a problem.
 
 ## Limits
 
