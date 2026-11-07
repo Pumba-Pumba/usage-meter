@@ -1,0 +1,6 @@
+{
+  "name": "usage-meter",
+  "description": "usage-meter: prompt-cache countdown and Claude usage limits on one status line, in ten designs.",
+  "owner": { "name": "Pumba-Pumba" },
+  "plugins": [{ "name": "usage-meter", "source": "./" }]
+}
