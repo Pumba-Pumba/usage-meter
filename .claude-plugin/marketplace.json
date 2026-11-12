@@ -1,6 +1,6 @@
 {
   "name": "usage-meter",
-  "description": "usage-meter: prompt-cache countdown and Claude usage limits on one status line, in ten designs.",
+  "description": "usage-meter: prompt-cache countdown with its price, Claude usage limits, a cold-send guard and opt-in keep-warm, on one status line in ten designs.",
   "owner": { "name": "Pumba-Pumba" },
   "plugins": [{ "name": "usage-meter", "source": "./" }]
 }

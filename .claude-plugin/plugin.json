@@ -1,7 +1,7 @@
 {
   "name": "usage-meter",
-  "version": "1.0.1",
-  "description": "Prompt-cache countdown and your 5-hour and weekly Claude limits on one status line, in 10 designs (5 animated, 5 still). Reads no credentials, makes no network calls.",
+  "version": "1.1.0",
+  "description": "Prompt-cache countdown with its price, your 5-hour and weekly Claude limits, a send-guard for cold sends and opt-in keep-warm, on one status line in 10 designs. Reads no credentials.",
   "author": {
     "name": "Pumba-Pumba"
   },

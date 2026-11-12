@@ -12,10 +12,11 @@ import { fmtClock, fmtTokens, hitRate, promptTokens, TTL_MS } from './cache'
 import type { CacheState } from './cache'
 import { fmtSpan, pace, shortName } from './limits'
 import type { Limit } from './limits'
+import { coldUsd, fmtUsd } from './price'
 
 export type CacheView =
   | { kind: 'none' }
-  | { kind: 'cold'; reCache: number; misses: number }
+  | { kind: 'cold'; reCache: number; misses: number; usd?: number }
   | { kind: 'warm'; left: number; frac: number; hit: number; misses: number; unsure: boolean }
 
 export type LimitView = { kind: string; pct: number; resetIn?: number; fullIn?: number }
@@ -31,7 +32,12 @@ export const snapshot = (cache: CacheState, limits: readonly Limit[], now: numbe
     const left = cache.last.at + ttlMs - now
     c =
       left <= 0
-        ? { kind: 'cold', reCache: promptTokens(cache.last), misses: cache.misses }
+        ? {
+            kind: 'cold',
+            reCache: promptTokens(cache.last),
+            misses: cache.misses,
+            usd: coldUsd(cache.last.model, promptTokens(cache.last), cache.ttl),
+          }
         : { kind: 'warm', left, frac: left / ttlMs, hit: hitRate(cache), misses: cache.misses, unsure: cache.ttlSource === 'assumed' }
   }
   const l = [...limits]
@@ -57,6 +63,8 @@ type Theme = {
 }
 
 // ── shared pieces ────────────────────────────────────────────────────────────
+/** The cold re-cache's price, ` ~$0.42`, or nothing for a model with no price row. */
+const usd = (c: { usd?: number }) => (c.usd === undefined ? '' : ` ~${fmtUsd(c.usd)}`)
 const at = <T>(list: readonly T[], i: number) => list[((i % list.length) + list.length) % list.length] as T
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x))
 const join = (parts: (string | undefined)[], sep: string) => {
@@ -116,7 +124,7 @@ const aurora: Theme = {
               return `${at(['◜', '◝', '◞', '◟'], tempo(s.cache.frac, f))} ${fmtClock(s.cache.left)}${q(s.cache)} ${bar.join('')}${misses(s.cache.misses)}`
             })()
           : s.cache.kind === 'cold'
-            ? `◌ dim ${line(0, 10)} ${fmtTokens(s.cache.reCache)} to relight`
+            ? `◌ dim ${line(0, 10)} ${fmtTokens(s.cache.reCache)} to relight${usd(s.cache)}`
             : undefined,
         ...s.limits.map(l => `${shortName(l.kind)} ${line(l.pct / 100, 8)} ${l.pct}%${tail(l)}`),
       ],
@@ -143,7 +151,7 @@ const pulse: Theme = {
               return `${at(['ϟ', 'ϟ', 'ϟ', '⌁'], f)} ${fmtClock(s.cache.left)}${q(s.cache)} ${wave}${misses(s.cache.misses)}`
             })()
           : s.cache.kind === 'cold'
-            ? `⌁ offline ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ ${fmtTokens(s.cache.reCache)} to reboot`
+            ? `⌁ offline ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ ${fmtTokens(s.cache.reCache)} to reboot${usd(s.cache)}`
             : undefined,
         ...s.limits.map(l => `${shortName(l.kind)} ${LEVEL[Math.min(7, Math.floor((Math.min(100, l.pct) / 100) * 8))]} ${l.pct}%${tail(l)}`),
       ],
@@ -167,7 +175,7 @@ const glass: Theme = {
               return `${at(['◇', '◈', '◆', '◈'], tempo(s.cache.frac, f))} ${fmtClock(s.cache.left)}${q(s.cache)} ${b.join('')}${misses(s.cache.misses)}`
             })()
           : s.cache.kind === 'cold'
-            ? `◇ clear ${beads(0, 5)} ${fmtTokens(s.cache.reCache)} to refill`
+            ? `◇ clear ${beads(0, 5)} ${fmtTokens(s.cache.reCache)} to refill${usd(s.cache)}`
             : undefined,
         ...s.limits.map(l => `${shortName(l.kind)} ${beads(l.pct / 100, 5, '◌')} ${l.pct}%${tail(l)}`),
       ],
@@ -197,7 +205,7 @@ const flux: Theme = {
         s.cache.kind === 'warm'
           ? `⟡ ${fmtClock(s.cache.left)}${q(s.cache)} ${scan(s.cache.frac < 0.2 ? f * 2 : f)}${misses(s.cache.misses)}`
           : s.cache.kind === 'cold'
-            ? `⟡ idle ${'∙'.repeat(FLUX_W)} ${fmtTokens(s.cache.reCache)} to recharge`
+            ? `⟡ idle ${'∙'.repeat(FLUX_W)} ${fmtTokens(s.cache.reCache)} to recharge${usd(s.cache)}`
             : undefined,
         ...s.limits.map(l => `${shortName(l.kind)} ${segments(l.pct / 100, 6)} ${l.pct}%${tail(l)}`),
       ],
@@ -216,7 +224,7 @@ const classic: Theme = {
         s.cache.kind === 'warm'
           ? `${dot(false, s.cache.frac < 0.2)} cache ${fmtClock(s.cache.left)}${q(s.cache)} · hit ${s.cache.hit}%${misses(s.cache.misses)}`
           : s.cache.kind === 'cold'
-            ? `🔴 cache cold · ~${fmtTokens(s.cache.reCache)} to re-cache`
+            ? `🔴 cache cold · ~${fmtTokens(s.cache.reCache)} to re-cache${usd(s.cache)}`
             : undefined,
         ...s.limits.map(
           l =>
@@ -251,7 +259,7 @@ const prism: Theme = {
         s.cache.kind === 'warm'
           ? `${at(['◐', '◓', '◑', '◒'], tempo(s.cache.frac, f))} ${fmtClock(s.cache.left)}${q(s.cache)} ${prismBar(s.cache.frac, 10, tempo(s.cache.frac, f))}${misses(s.cache.misses)}`
           : s.cache.kind === 'cold'
-            ? `◌ ${prismBar(0, 10, null)} ${fmtTokens(s.cache.reCache)} to refract`
+            ? `◌ ${prismBar(0, 10, null)} ${fmtTokens(s.cache.reCache)} to refract${usd(s.cache)}`
             : undefined,
         ...s.limits.map(l => `${shortName(l.kind)} ${prismBar(l.pct / 100, 6, null)} ${l.pct}%${tail(l)}`),
       ],
@@ -271,7 +279,7 @@ const bars: Theme = {
         s.cache.kind === 'warm'
           ? `⏱ ${fmtClock(s.cache.left)}${q(s.cache)} ${segments(s.cache.frac, 5)} ${s.cache.hit}%${misses(s.cache.misses)}`
           : s.cache.kind === 'cold'
-            ? `❄ cold · ${fmtTokens(s.cache.reCache)} to re-cache`
+            ? `❄ cold · ${fmtTokens(s.cache.reCache)} to re-cache${usd(s.cache)}`
             : undefined,
         ...s.limits.map(l => `${l.kind === 'five_hour' ? '⚡' : '📅'} ${shortName(l.kind)} ${segments(l.pct / 100, 5)} ${l.pct}%${tail(l)}`),
       ],
@@ -289,7 +297,7 @@ const icons: Theme = {
         s.cache.kind === 'warm'
           ? `🧠 ${fmtClock(s.cache.left)}${q(s.cache)}${s.cache.frac < 0.2 ? ' ⚠' : ''} · ${s.cache.hit}%${misses(s.cache.misses)}`
           : s.cache.kind === 'cold'
-            ? `🧊 cold ${fmtTokens(s.cache.reCache)}`
+            ? `🧊 cold ${fmtTokens(s.cache.reCache)}${usd(s.cache)}`
             : undefined,
         ...s.limits.map(
           l =>
@@ -311,7 +319,7 @@ const minimal: Theme = {
         s.cache.kind === 'warm'
           ? `${flag(false, s.cache.frac < 0.2)}cache ${fmtClock(s.cache.left)}${q(s.cache)}`
           : s.cache.kind === 'cold'
-            ? '🔴 cache cold'
+            ? `🔴 cache cold${usd(s.cache)}`
             : undefined,
         ...s.limits.map(
           l =>
@@ -332,7 +340,7 @@ const blueprint: Theme = {
         s.cache.kind === 'warm'
           ? `cache ${fmtClock(s.cache.left)}${q(s.cache)} ${line(s.cache.frac, 10)}${misses(s.cache.misses)}`
           : s.cache.kind === 'cold'
-            ? `cache cold ${line(0, 10)} ${fmtTokens(s.cache.reCache)}`
+            ? `cache cold ${line(0, 10)} ${fmtTokens(s.cache.reCache)}${usd(s.cache)}`
             : undefined,
         ...s.limits.map(l => `${shortName(l.kind)} ${line(l.pct / 100, 8)} ${l.pct}%${tail(l)}`),
       ],

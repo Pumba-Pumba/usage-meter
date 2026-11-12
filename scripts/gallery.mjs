@@ -17,7 +17,7 @@ const hooks = join(root, 'hooks')
 const out = join(root, 'docs')
 const tmp = mkdtempSync(join(tmpdir(), 'usage-meter-gallery-'))
 
-for (const file of ['cache.ts', 'limits.ts', 'themes.ts']) {
+for (const file of ['cache.ts', 'limits.ts', 'price.ts', 'themes.ts']) {
   const src = readFileSync(join(hooks, file), 'utf8').replace(/from '\.\/(\w+)'/g, "from './$1.ts'")
   writeFileSync(join(tmp, file), src)
 }

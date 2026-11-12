@@ -8,6 +8,8 @@
  *   nothing proves 5m. It can also be set by hand.
  */
 
+import { coldUsd, fmtUsd, recacheUsd, warmUsd } from './price'
+
 export type Ttl = '5m' | '1h'
 export type TtlSource = 'learned' | 'manual' | 'assumed'
 
@@ -15,7 +17,11 @@ export const TTL_MS: Record<Ttl, number> = { '5m': 5 * 60_000, '1h': 60 * 60_000
 /** A drop in cache reads smaller than this is noise, not a re-cache. */
 const MISS_MIN_TOKENS = 2_000
 
-export type Step = { at: number; input: number; cacheRead: number; cacheWrite: number }
+/**
+ * One main-thread request: `at` is when it was sent (the cache is read, and
+ * its lifetime restarts, as the request is handled, not when the reply ends).
+ */
+export type Step = { at: number; input: number; cacheRead: number; cacheWrite: number; model?: string }
 
 export type CacheState = {
   ttl: Ttl
@@ -25,6 +31,8 @@ export type CacheState = {
   totalRead: number
   misses: number
   missTokens: number
+  /** What the unexpected re-caches cost at list price; 0 for a model with no price row. */
+  missUsd: number
   warnedFor: number | null
 }
 
@@ -36,6 +44,7 @@ export const fresh = (): CacheState => ({
   totalRead: 0,
   misses: 0,
   missTokens: 0,
+  missUsd: 0,
   warnedFor: null,
 })
 
@@ -75,6 +84,7 @@ export const record = (state: CacheState, step: Step): CacheState => {
   if (isMiss && gap < TTL_MS[next.ttl]) {
     next.misses += 1
     next.missTokens += step.cacheWrite + step.input
+    next.missUsd += recacheUsd(step.model, next.ttl, step.cacheWrite, step.input) ?? 0
   }
 
   return next
@@ -85,7 +95,7 @@ export const record = (state: CacheState, step: Step): CacheState => {
  * last reply was (and so whether the cache is still warm) instead of starting
  * over. The TTL is kept apart, across all sessions.
  */
-export type Saved = Pick<CacheState, 'last' | 'totalInput' | 'totalRead' | 'misses' | 'missTokens'>
+export type Saved = Pick<CacheState, 'last' | 'totalInput' | 'totalRead' | 'misses' | 'missTokens' | 'missUsd'>
 
 export const toSaved = (s: CacheState): Saved => ({
   last: s.last,
@@ -93,6 +103,7 @@ export const toSaved = (s: CacheState): Saved => ({
   totalRead: s.totalRead,
   misses: s.misses,
   missTokens: s.missTokens,
+  missUsd: s.missUsd,
 })
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
@@ -112,11 +123,19 @@ export const restore = (state: CacheState, saved: unknown): CacheState => {
   }
   return {
     ...state,
-    last: { at: v.last.at, input: v.last.input, cacheRead: v.last.cacheRead, cacheWrite: v.last.cacheWrite },
+    last: {
+      at: v.last.at,
+      input: v.last.input,
+      cacheRead: v.last.cacheRead,
+      cacheWrite: v.last.cacheWrite,
+      ...(typeof (v.last as Step).model === 'string' ? { model: (v.last as Step).model } : {}),
+    },
     totalInput: v.totalInput,
     totalRead: v.totalRead,
     misses: v.misses,
     missTokens: v.missTokens,
+    // Saved before 1.1.0 without it.
+    missUsd: isNum(v.missUsd) ? v.missUsd : 0,
   }
 }
 
@@ -133,6 +152,22 @@ export const fmtTokens = (n: number) =>
 
 export const hitRate = (state: CacheState) =>
   state.totalInput > 0 ? Math.round((state.totalRead / state.totalInput) * 100) : 0
+
+/** When the cache goes cold; undefined before a reply. */
+export const expiresAt = (state: CacheState) => (state.last ? state.last.at + TTL_MS[state.ttl] : undefined)
+
+/**
+ * What the next message re-sends if the cache is cold, and at what price:
+ * the whole prefix written again, against reading it while warm.
+ */
+export const coldCost = (state: CacheState) => {
+  const last = state.last
+  if (last === null) return undefined
+  const tokens = promptTokens(last)
+  return { tokens, usd: coldUsd(last.model, tokens, state.ttl), warm: warmUsd(last.model, tokens) }
+}
+
+const usdNote = (usd: number | undefined) => (usd === undefined ? '' : ` (~${fmtUsd(usd)})`)
 
 /** The compact segment for the shared status line; undefined before a reply. */
 export const cacheSegment = (state: CacheState, now: number): string | undefined => {
@@ -160,14 +195,20 @@ export const cacheDetails = (state: CacheState, now: number) => {
   const last = state.last
   if (last === null) return ['Cache: no model reply yet in this session.']
   const left = last.at + TTL_MS[state.ttl] - now
+  const cost = coldCost(state)
   const lines = [
     left > 0
       ? `Cache: warm, ${fmtClock(left)} left (TTL ${state.ttl}, ${state.ttlSource})`
-      : `Cache: cold; the next message re-caches ~${fmtTokens(promptTokens(last))} tokens (TTL ${state.ttl}, ${state.ttlSource})`,
+      : `Cache: cold; the next message re-caches ~${fmtTokens(promptTokens(last))} tokens${usdNote(cost?.usd)} (TTL ${state.ttl}, ${state.ttlSource})`,
     `  Conversation prefix ~${fmtTokens(promptTokens(last))} tokens; ${fmtTokens(state.totalRead)} of ${fmtTokens(state.totalInput)} prompt tokens served from cache (${hitRate(state)}%)`,
   ]
+  if (cost?.usd !== undefined && cost.warm !== undefined) {
+    lines.push(`  Cold re-cache ~${fmtUsd(cost.usd)} at list price, against ~${fmtUsd(cost.warm)} while warm (${last.model})`)
+  }
   if (state.misses > 0) {
-    lines.push(`  Unexpected re-caches: ${state.misses} (~${fmtTokens(state.missTokens)} tokens re-sent)`)
+    lines.push(
+      `  Unexpected re-caches: ${state.misses} (~${fmtTokens(state.missTokens)} tokens re-sent${state.missUsd > 0 ? `, ~${fmtUsd(state.missUsd)}` : ''})`,
+    )
   }
   if (state.ttlSource === 'assumed') {
     lines.push('  TTL is assumed until a pause of 5-60 min shows which it is; or set it: /meter ttl 5m|1h')
